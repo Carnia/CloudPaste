@@ -3717,7 +3717,7 @@ createApp({
             } else {
               try {
                 const errorData = JSON.parse(xhr.response);
-                if(errorData.message && errorData.message.includes('存储空间')) {
+                if(errorData.message) {
                   reject(new Error(errorData.message));
                 } else {
                   reject(new Error('Upload failed'));
@@ -7171,7 +7171,7 @@ const rateLimit = async (request, env) => {
   const currentCount = +(await store.get(key)) || 0;
 
   if (currentCount >= 5) { // 每分钟最多5次上传
-    
+
     return new Response(
       JSON.stringify({
         message: "上传频率过高，请稍后再试",
@@ -7190,6 +7190,109 @@ const rateLimit = async (request, env) => {
 
   return null;
 };
+function formatDuration(ms) {
+  const timeUnits = [
+      { unit: '天', duration: 86400000 },
+      { unit: '小时', duration: 3600000 },
+      { unit: '分钟', duration: 60000 },
+      { unit: '秒', duration: 1000 }
+  ];
+  const parts = [];
+  
+  for (const { unit, duration } of timeUnits) {
+      const count = Math.floor(ms / duration);
+      if (count > 0) {
+          parts.push(`${count}${unit}`);
+          ms %= duration;
+      }
+  }
+  
+  return parts.length > 0 ? parts.join('') : '0秒';
+}
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 Bytes';
+
+  const units = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+  const unitDigits = (unit) => {
+      // 如果是KB、MB、GB、TB 就少显示一位小数（如 1.23MB → 1.2MB）
+      if (unit !== 'Bytes' && bytes >= 1024) {
+          return 1;
+      }
+      return 0; // Bytes 显示整数
+  };
+
+  const exp = Math.floor(Math.log(bytes) / Math.log(1024));
+  const unit = units[exp];
+  const value = (bytes / Math.pow(1024, exp)).toFixed(unitDigits(unit)); // 动态决定小数位数
+  const formatted = value.replace(/\.0$/, ''); // 如果小数位为 0 则去除（如 2.0 → 2）
+
+  return `${formatted}${unit}`;
+}
+/**
+ * 检查文件是否超出时段限制
+ * @param {*} request 
+ * @param {*} env 
+ * @param {*} currentFileSize 
+ * @returns 
+ */
+const sizeLimit = async (request, env, currentFileSize) => {
+  const ip = request.headers.get('cf-connecting-ip');
+  // 非管理员24小时限制配置
+  const USER_QUOTA = 2 * 1024 * 1024 * 1024; // 2GB
+  const WINDOW_HOURS = 24;
+  const userKey = `upload_size_limit:${ip}`;
+  const store = env.SYS_STORE || env.PASTE_STORE;
+  const res = await store.get(userKey);
+  const userData = res ? JSON.parse(res) : {
+    uploads: [],
+    total: 0
+  };
+  // 过滤24小时外的记录
+  const now = Date.now();
+  const validUploads = userData.uploads.filter(u =>
+    u.timestamp > now - WINDOW_HOURS * 3600 * 1000
+  );
+  // 重新计算有效总量
+  const currentUsage = validUploads.reduce((sum, u) => sum + u.size, 0);
+
+  // 检查新总量，如果超出则报错
+  if (currentUsage + currentFileSize > USER_QUOTA) {
+    // 更新存储
+    if (userData.uploads.length !== validUploads.length) {
+      await store.put(userKey, JSON.stringify({
+        uploads: validUploads,
+        total: currentUsage
+      }), {
+        expirationTtl: 24 * 60 * 60 // 1分钟
+      });
+    }
+    const remainTime = userData.uploads[0]?.timestamp ? (userData.uploads[0].timestamp + WINDOW_HOURS * 3600 * 1000 - now) : WINDOW_HOURS * 3600 * 1000
+    return new Response(
+      JSON.stringify({
+        message: `24小时内限制上传2G，24h内已使用${formatBytes(currentUsage)}，还剩${formatDuration(remainTime)}刷新。当前上传文件大小${formatBytes(currentFileSize)}`,
+        status: "error",
+      }),
+      {
+        status: 429,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  }
+
+  // 更新存储（添加新记录+更新总量）
+  const cb = async () => {
+    await store.put(userKey, JSON.stringify({
+      uploads: [...validUploads, {
+        size: currentFileSize,
+        timestamp: now
+      }],
+      total: currentUsage + currentFileSize
+    }), {
+      expirationTtl: 24 * 60 * 60 // 24h
+    });
+  }
+  return cb
+};
 // 处理粘贴内容
 async function handlePaste(request, env) {
   const url = new URL(request.url);
@@ -7201,9 +7304,9 @@ async function handlePaste(request, env) {
       // 添加管理员权限验证
       const isAdmin = await verifyAdmin(request, env);
       if (!isAdmin) {
-      const rateLimitError = await rateLimit(request, env);
-      if (rateLimitError) {
-        return rateLimitError;
+        const rateLimitError = await rateLimit(request, env);
+        if (rateLimitError) {
+          return rateLimitError;
         }
       }
 
@@ -7465,9 +7568,9 @@ async function handleFile(request, env, ctx) {
         // 添加管理员权限验证
         const isAdmin = await verifyAdmin(request, env);
         if (isAdmin) {
-        const rateLimitError = await rateLimit(request, env);
-        if (rateLimitError) {
-          return rateLimitError;
+          const rateLimitError = await rateLimit(request, env);
+          if (rateLimitError) {
+            return rateLimitError;
           }
         }
 
@@ -7491,7 +7594,6 @@ async function handleFile(request, env, ctx) {
 
         // 计算新文件的总大小
         const newFilesSize = files.reduce((total, file) => total + file.size, 0);
-
         // 检查是否会超出总存储限制
         if (currentStorage + newFilesSize > MAX_TOTAL_STORAGE) {
           return new Response(
@@ -7627,6 +7729,16 @@ async function handleFile(request, env, ctx) {
         const uploadResults = [];
         let hasSuccess = false;
 
+
+        let storageCallBack
+        // 非管理员添加文件上传限制，24小时内只允许上传2G
+        if (!isAdmin) {
+          // 校验文件是否超过限制
+          storageCallBack = await sizeLimit(request, env, newFilesSize)
+          if (Object.prototype.toString.call(storageCallBack) === '[object Response]') {
+            return storageCallBack
+          }
+        }
         for (const file of files) {
           try {
             if (!file || !(file instanceof File)) {
@@ -7676,7 +7788,6 @@ async function handleFile(request, env, ctx) {
                 continue;
               }
             }
-
             // 准备元数据
             const metadata = {
               filename: file.name,
@@ -7739,6 +7850,10 @@ async function handleFile(request, env, ctx) {
               status: "error",
             });
           }
+        }
+        
+        if (!isAdmin && hasSuccess && storageCallBack) {
+          await storageCallBack()
         }
 
         return new Response(
