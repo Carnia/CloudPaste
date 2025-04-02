@@ -3535,10 +3535,10 @@ createApp({
     // 提交粘贴内容
     const submitPaste = async () => {
       // 检查是否允许上传
-      if (!allowTextUpload.value) {
-        error.value = '文本上传功能已关闭';
-        return;
-      }
+    //   if (!allowTextUpload.value) {
+    //     error.value = '文本上传功能已关闭';
+    //     return;
+    //   }
       try {
         error.value = null;
         const credentials = localStorage.getItem('adminCredentials'); 
@@ -3587,10 +3587,10 @@ createApp({
     // 上传文件
     const uploadFiles = async () => {
       // 检查是否允许上传
-      if (!allowFileUpload.value) {
-        error.value = '文件上传功能已关闭';
-        return;
-      }
+    //   if (!allowFileUpload.value) {
+    //     error.value = '文件上传功能已关闭';
+    //     return;
+    //   }
       try {
         error.value = null;
         
@@ -7163,6 +7163,33 @@ const shareHtml = `<!DOCTYPE html>
   </body>
 </html>`;
 
+const rateLimit = async (request, env) => {
+  const ip = request.headers.get('CF-Connecting-IP');
+  const key = `rate_limit:${ip}`;
+  // 优先使用SYS_STORE
+  const store = env.SYS_STORE || env.PASTE_STORE;
+  const currentCount = +(await store.get(key)) || 0;
+
+  if (currentCount >= 5) { // 每分钟最多5次上传
+    
+    return new Response(
+      JSON.stringify({
+        message: "上传频率过高，请稍后再试",
+        status: "error",
+      }),
+      {
+        status: 429,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  }
+
+  await store.put(key, (currentCount + 1).toString(), {
+    expirationTtl: 60 // 1分钟
+  });
+
+  return null;
+};
 // 处理粘贴内容
 async function handlePaste(request, env) {
   const url = new URL(request.url);
@@ -7172,20 +7199,12 @@ async function handlePaste(request, env) {
   switch (request.method) {
     case "POST": {
       // 添加管理员权限验证
-      if (!(await verifyAdmin(request, env))) {
-        return new Response(
-          JSON.stringify({
-            status: "error",
-            message: "未授权访问",
-          }),
-          {
-            status: 401,
-            headers: {
-              "Content-Type": "application/json",
-              "Access-Control-Allow-Origin": "*",
-            },
-          }
-        );
+      const isAdmin = await verifyAdmin(request, env);
+      if (!isAdmin) {
+      const rateLimitError = await rateLimit(request, env);
+      if (rateLimitError) {
+        return rateLimitError;
+        }
       }
 
       const data = await request.json();
@@ -7258,7 +7277,7 @@ async function handlePaste(request, env) {
       const paste = {
         content,
         isMarkdown,
-        note, 
+        note,
         createdAt: new Date().toISOString(),
         expiresAt: expiresIn === "never" ? null : utils.calculateExpiryTime(expiresIn)?.toISOString(),
         maxViews: parseInt(maxViews) || 0, // 添加这行
@@ -7444,20 +7463,12 @@ async function handleFile(request, env, ctx) {
     case "POST": {
       try {
         // 添加管理员权限验证
-        if (!(await verifyAdmin(request, env))) {
-          return new Response(
-            JSON.stringify({
-              status: "error",
-              message: "未授权访问",
-            }),
-            {
-              status: 401,
-              headers: {
-                "Content-Type": "application/json",
-                "Access-Control-Allow-Origin": "*",
-              },
-            }
-          );
+        const isAdmin = await verifyAdmin(request, env);
+        if (isAdmin) {
+        const rateLimitError = await rateLimit(request, env);
+        if (rateLimitError) {
+          return rateLimitError;
+          }
         }
 
         // 计算当前已使用的存储空间
@@ -8126,18 +8137,18 @@ async function cleanupExpiredContent(env) {
 // 在 handleFile 和 handlePaste 函数之间添加新的函数
 async function handleUploadStatus(request, env) {
   // 验证管理员权限
-  if (!(await verifyAdmin(request, env))) {
-    return new Response(
-      JSON.stringify({
-        status: "error",
-        message: "未授权访问",
-      }),
-      {
-        status: 401,
-        headers: { "Content-Type": "application/json" },
-      }
-    );
-  }
+  //   if (!(await verifyAdmin(request, env))) {
+  //     return new Response(
+  //       JSON.stringify({
+  //         status: "error",
+  //         message: "未授权访问",
+  //       }),
+  //       {
+  //         status: 401,
+  //         headers: { "Content-Type": "application/json" },
+  //       }
+  //     );
+  //   }
 
   switch (request.method) {
     case "GET": {
